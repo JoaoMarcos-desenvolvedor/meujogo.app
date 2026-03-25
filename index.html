@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Space Shooter Mobile - Master</title>
+    <style>
+        body { 
+            margin: 0; background: #000; color: white; 
+            display: flex; flex-direction: column; justify-content: center; 
+            align-items: center; height: 100vh; font-family: 'Courier New', monospace; 
+            overflow: hidden; touch-action: none; /* Bloqueia gestos do navegador */
+        }
+        canvas { 
+            border: 2px solid #333; background: black; 
+            box-shadow: 0 0 20px rgba(0, 255, 204, 0.3);
+            max-width: 100%; max-height: 80vh; /* Ajuste para caber em telas mobile */
+        }
+        .hud { margin-top: 10px; color: #888; font-size: 14px; text-align: center; }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+    <div class="hud">Arraste para Mover | Toque para Iniciar</div>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = 400; canvas.height = 600;
+
+        // --- MOTOR DE ÁUDIO ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playTone(f, t, d, v, r) {
+            try {
+                const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+                o.type = t; o.frequency.setValueAtTime(f, audioCtx.currentTime);
+                if(r) o.frequency.exponentialRampToValueAtTime(r, audioCtx.currentTime + d);
+                g.gain.setValueAtTime(v, audioCtx.currentTime); 
+                g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + d);
+                o.connect(g); g.connect(audioCtx.destination); 
+                o.start(); o.stop(audioCtx.currentTime + d);
+            } catch(e) {}
+        }
+
+        // --- MÚSICA ADAPTATIVA ---
+        let musicInterval;
+        function startMusic() {
+            let step = 0;
+            const melody = [261, 329, 392, 523];
+            const bossMelody = [130, 138, 146, 123];
+            if(musicInterval) clearInterval(musicInterval);
+            musicInterval = setInterval(() => {
+                if(gameState !== 'PLAYING') return;
+                let freq = boss.active ? bossMelody[step % 4] : melody[step % 4];
+                playTone(freq, boss.active ? 'sawtooth' : 'triangle', 0.4, 0.02);
+                step++;
+            }, boss.active ? 200 : 400);
+        }
+
+        // --- ESTADO DO JOGO ---
+        let gameState = 'MENU';
+        let score = 0, frameCount = 0, shakeDuration = 0;
+        let highScore = localStorage.getItem("spaceHighScore") || 0;
+        let isTouching = false, touchX = 200;
+
+        let bullets = [], asteroids = [], stars = [], particles = [], enemyBullets = [], powerups = [];
+        let bossLevel = 1, nextBossScore = 500, tripleShotTimer = 0;
+
+        const player = { x: 185, y: 520, w: 35, h: 35, color: "#00ffcc" };
+        const boss = { x: 150, y: -100, w: 100, h: 40, hp: 50, maxHp: 50, active: false, speedX: 2 };
+
+        for(let i=0; i<40; i++) stars.push({x: Math.random()*400, y: Math.random()*600, s: Math.random()*2, sp: Math.random()*2+1});
+
+        // --- INPUTS MOBILE (TOUCH) ---
+        function handleTouch(e) {
+            e.preventDefault();
+            if (gameState !== 'PLAYING') return;
+            isTouching = true;
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches[0].clientX;
+            touchX = (clientX - rect.left) * (canvas.width / rect.width);
+        }
+
+        canvas.addEventListener("touchstart", (e) => {
+            if (gameState === 'MENU' || gameState === 'GAMEOVER') startGame();
+            else handleTouch(e);
+        }, {passive: false});
+
+        canvas.addEventListener("touchmove", handleTouch, {passive: false});
+        canvas.addEventListener("touchend", () => isTouching = false);
+
+        // Suporte para PC (Teclado)
+        let keys = {};
+        window.addEventListener("keydown", e => { keys[e.code] = true; if(gameState !== 'PLAYING' && e.code === 'Space') startGame(); });
+        window.addEventListener("keyup", e => keys[e.code] = false);
+
+        function startGame() {
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+            gameState = 'PLAYING';
+            score = 0; bossLevel = 1; nextBossScore = 500; tripleShotTimer = 0;
+            bullets = []; asteroids = []; enemyBullets = []; powerups = [];
+            boss.active = false; boss.y = -100;
+            startMusic();
+        }
+
+        function createExplosion(x, y, color, power = 10) {
+            for(let i=0; i<power; i++) {
+                particles.push({ x, y, vx: (Math.random()-0.5)*10, vy: (Math.random()-0.5)*10, life: 1.0, color });
+            }
+            playTone(80, 'sawtooth', 0.2, 0.1, 20);
+            if(power > 30) shakeDuration = 15;
+        }
+
+        function rectIntersect(x1, y1, w1, h1, x2, y2, w2, h2) {
+            return x2 < x1 + w1 && x2 + w2 > x1 && y2 < y1 + h1 && y2 + h2 > y1;
+        }
+
+        function update() {
+            stars.forEach(s => { s.y += s.sp; if(s.y > 600) s.y = 0; });
+            particles.forEach((p, i) => { p.x += p.vx; p.y += p.vy; p.life -= 0.025; if(p.life <= 0) particles.splice(i, 1); });
+
+            if(gameState !== 'PLAYING') return;
+            frameCount++;
+            if(tripleShotTimer > 0) tripleShotTimer--;
+
+            // MOVIMENTO NAVE
+            if (isTouching) {
+                let targetX = touchX - player.w/2;
+                player.x += (targetX - player.x) * 0.15; // Suavização
+            } else {
+                if(keys["ArrowLeft"] && player.x > 0) player.x -= 7;
+                if(keys["ArrowRight"] && player.x < canvas.width - player.w) player.x += 7;
+            }
+
+            // AUTO-FIRE (Tira enquanto toca ou aperta espaço)
+            if((isTouching || keys["Space"]) && frameCount % 10 === 0) fireLaser();
+
+            // Lógica Boss e Inimigos
+            if(score >= nextBossScore && !boss.active) {
+                boss.active = true; boss.hp = 50 + (bossLevel * 30); boss.maxHp = boss.hp;
+                startMusic();
+            }
+
+            if(boss.active) {
+                if(boss.y < 70) boss.y += 1.5;
+                boss.x += boss.speedX;
+                if(boss.x <= 0 || boss.x >= canvas.width - boss.w) boss.speedX *= -1;
+                if(frameCount % 40 === 0) enemyBullets.push({x: boss.x + 50, y: boss.y + 40, w: 6, h: 15});
+            } else if(frameCount % 35 === 0) {
+                asteroids.push({x: Math.random()*370, y: -40, w: 30, h: 30, sp: 3 + score/1000});
+            }
+
+            // Colisões e Balas
+            bullets.forEach((b, i) => { b.y -= 12; b.x += (b.vx || 0); if(b.y < -20) bullets.splice(i, 1); });
+            enemyBullets.forEach((eb, i) => { 
+                eb.y += 6; 
+                if(rectIntersect(player.x, player.y, player.w, player.h, eb.x, eb.y, eb.w, eb.h)) die();
+            });
+
+            powerups.forEach((p, i) => {
+                p.y += 3;
+                if(rectIntersect(player.x, player.y, player.w, player.h, p.x, p.y, p.w, p.h)) {
+                    tripleShotTimer = 400; playTone(600, 'sine', 0.4, 0.1, 1200); powerups.splice(i, 1);
+                }
+            });
+
+            asteroids.forEach((a, ai) => {
+                a.y += a.sp;
+                if(rectIntersect(player.x, player.y, player.w, player.h, a.x, a.y, a.w, a.h)) die();
+                bullets.forEach((b, bi) => {
+                    if(rectIntersect(a.x, a.y, a.w, a.h, b.x, b.y, b.w, b.h)) {
+                        createExplosion(a.x+15, a.y+15, "#ff4757", 10);
+                        if(Math.random() < 0.1) powerups.push({x: a.x, y: a.y, w: 20, h: 20});
+                        asteroids.splice(ai, 1); bullets.splice(bi, 1); score += 10;
+                    }
+                });
+            });
+
+            if(boss.active) {
+                bullets.forEach((b, bi) => {
+                    if(rectIntersect(b.x, b.y, b.w, b.h, boss.x, boss.y, boss.w, boss.h)) {
+                        boss.hp--; bullets.splice(bi, 1);
+                        if(boss.hp <= 0) {
+                            boss.active = false; bossLevel++; nextBossScore += 1200;
+                            createExplosion(boss.x+50, boss.y+20, "#ffcc00", 50);
+                            score += 500; startMusic();
+                        }
+                    }
+                });
+            }
+            if(shakeDuration > 0) shakeDuration--;
+        }
+
+        function fireLaser() {
+            if(tripleShotTimer > 0) {
+                bullets.push({x: player.x, y: player.y, w: 4, h: 12, vx: -2});
+                bullets.push({x: player.x + 15, y: player.y, w: 4, h: 12, vx: 0});
+                bullets.push({x: player.x + 30, y: player.y, w: 4, h: 12, vx: 2});
+            } else {
+                bullets.push({x: player.x + player.w/2 - 2, y: player.y, w: 4, h: 12, vx: 0});
+            }
+            playTone(400, 'square', 0.1, 0.03, 800);
+        }
+
+        function die() {
+            gameState = 'GAMEOVER';
+            if(score > highScore) { highScore = score; localStorage.setItem("spaceHighScore", highScore); }
+            createExplosion(player.x+15, player.y+15, "#ffffff", 40);
+        }
+
+        function draw() {
+            ctx.save();
+            if(shakeDuration > 0) ctx.translate(Math.random()*10-5, Math.random()*10-5);
+            ctx.fillStyle = "black"; ctx.fillRect(0,0,400,600);
+            ctx.fillStyle = "white"; stars.forEach(s => ctx.fillRect(s.x, s.y, s.s, s.s));
+            particles.forEach(p => { ctx.fillStyle = `rgba(255, 255, 255, ${p.life})`; ctx.fillRect(p.x, p.y, 2, 2); });
+
+            if(gameState === 'MENU') {
+                ctx.fillStyle = "#00ffcc"; ctx.textAlign = "center"; ctx.font = "30px Courier New";
+                ctx.fillText("SPACE MOBILE", 200, 250);
+                ctx.fillStyle = "white"; ctx.font = "16px Courier New";
+                ctx.fillText("RECORDE: " + highScore, 200, 300);
+                ctx.fillText("TOQUE NA TELA PARA JOGAR", 200, 380);
+            } 
+            else {
+                // Desenhar Nave Player
+                ctx.fillStyle = player.color;
+                ctx.beginPath();
+                ctx.moveTo(player.x + player.w/2, player.y);
+                ctx.lineTo(player.x, player.y + player.h);
+                ctx.lineTo(player.x + player.w, player.y + player.h);
+                ctx.fill();
+
+                ctx.fillStyle = "white"; bullets.forEach(b => ctx.fillRect(b.x, b.y, b.w, b.h));
+                ctx.fillStyle = "#00a2ff"; powerups.forEach(p => ctx.fillRect(p.x, p.y, p.w, p.h));
+                ctx.fillStyle = "#ff4d4d"; enemyBullets.forEach(eb => ctx.fillRect(eb.x, eb.y, eb.w, eb.h));
+                ctx.strokeStyle = "#ff4757"; asteroids.forEach(a => ctx.strokeRect(a.x, a.y, a.w, a.h));
+
+                if(boss.active) {
+                    ctx.fillStyle = "#ffcc00"; ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+                    ctx.fillStyle = "red"; ctx.fillRect(boss.x, boss.y-10, (boss.hp/boss.maxHp)*boss.w, 6);
+                }
+                ctx.fillStyle = "white"; ctx.font = "18px Courier New"; ctx.textAlign = "left";
+                ctx.fillText(`SCORE: ${score}`, 15, 30);
+            }
+
+            if(gameState === 'GAMEOVER') {
+                ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(0,0,400,600);
+                ctx.fillStyle = "white"; ctx.textAlign = "center";
+                ctx.font = "24px Courier New"; ctx.fillText("MISSÃO ABORTADA", 200, 280);
+                ctx.font = "16px Courier New"; ctx.fillText("Toque para Reiniciar", 200, 330);
+            }
+            ctx.restore();
+        }
+
+        function gameLoop() { update(); draw(); requestAnimationFrame(gameLoop); }
+        gameLoop();
+    </script>
+</body>
+</html>
